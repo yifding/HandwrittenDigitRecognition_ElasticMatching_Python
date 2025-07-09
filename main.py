@@ -18,7 +18,7 @@ def match_n_cost(image_mask_label_array, image_transformed, no_wavelets, resized
 							cost from deforming the edges)
 	"""
 
-    initial_positions = list()
+	initial_positions = list()
 
 	for row in range(10):
 		for col in range(10):
@@ -153,22 +153,22 @@ def mask(mask_data, no_wavelets, resized_size, hyperparameter_list):
 	:param hyperparameter_list: list for different Gabor hyperparameters
 	"""
 
-    # directory traversal
-    file_list=[]
-    for (dirpath, dirnames, filenames) in os.walk(mask_data):
-        file_list.extend(filenames)
+	# directory traversal
+	file_list=[]
+	for (dirpath, dirnames, filenames) in os.walk(mask_data):
+		file_list.extend(filenames)
 
-    image_count = 0
-    for image_file in file_list:
+	image_count = 0
+	for image_file in file_list:
 		image_file_path = os.path.join(mask_data, image_file)
 		image = Image.open(image_file_path)
 		label = image_file_path[len(image_file_path):len(image_file_path)+1]
 		image =np.array(image)
 
-		gabor_wavelets = Transform(number_of_scales=hyperparameter_list[0], \
-								number_of_directions=hyperparameter_list[1], \
-								sigma=hyperparameter_list[3], \
-								k_max=hyperparameter_list[3], \
+		gabor_wavelets = Transform(number_of_scales=hyperparameter_list[0],
+								number_of_directions=hyperparameter_list[1],
+								sigma=hyperparameter_list[3],
+								k_max=hyperparameter_list[3],
 								k_fac=hyperparameter_list[4])
 		image_transformed = gabor_wavelets.transform(image)
 		image_mask = np.empty((no_wavelets, resized_size//2, resized_size//2),'complex128')
@@ -181,16 +181,25 @@ def mask(mask_data, no_wavelets, resized_size, hyperparameter_list):
 		if image_count == 0:
 			image_mask_label_array=np.array([image_mask, label, os.path.join(match_data, image_file)])
 		else:
-			image_mask_label_array=np.vstack([image_mask_label_array, \
-											np.array([image_mask_label_array, label, \
+			image_mask_label_array=np.vstack([image_mask_label_array,
+											np.array([image_mask_label_array, label,
 											os.path.join(match_data, image_file)])])
 
 		image_count += 1
 
 		return image_mask_label_array
 
-def eval(eval_data, mask_data, resized_size, image_mask_label_array, no_wavelets, log, hyperparameter_list, match_ite, \
-		relative_weight):
+def eval(
+	eval_data,
+	mask_data,
+	resized_size,
+	image_mask_label_array,
+	no_wavelets,
+	log,
+	hyperparameter_list,
+	match_ite,
+	relative_weight
+	):
 	"""
 	This method stores the masks from the mask ('train') set
 	:param eval_data: evaluation dataset
@@ -203,29 +212,35 @@ def eval(eval_data, mask_data, resized_size, image_mask_label_array, no_wavelets
 	:param match_ite: the number of iterations allowed for matching to a particular mask
 	"""
 
-    # directory traversal
-    file_list=[]
-    for (dirpath, dirnames, filenames) in os.walk(eval_data):
-        file_list.extend(filenames)
+	# directory traversal
+	file_list=[]
+	for (dirpath, dirnames, filenames) in os.walk(eval_data):
+		file_list.extend(filenames)
 
-    image_count = 0
-    image_count_match = 0
+	image_count = 0
+	image_count_match = 0
 
-    for image_file in file_list:
+	for image_file in file_list:
 		image_file_path = os.path.join(eval_data, image_file)
 		image = Image.open(image_file_path)
 		label = image_file_path[len(image_file_path):len(image_file_path)+1]
 		image =np.array(image)
 
-   		gabor_wavelets = Transform(number_of_scales=hyperparameter_list[0], \
-   								number_of_directions=hyperparameter_list[1], \
-   								sigma=hyperparameter_list[3], \
-   								k_max=hyperparameter_list[3], \
+		gabor_wavelets = Transform(number_of_scales=hyperparameter_list[0],
+   								number_of_directions=hyperparameter_list[1],
+   								sigma=hyperparameter_list[3],
+   								k_max=hyperparameter_list[3],
    								k_fac=hyperparameter_list[4])
 		image_transformed = gabor_wavelets.transform(image)
 
-		match_file_path = match_n_cost(image_mask_label_array, image_transformed, no_wavelets, resized_size, \
-									match_ite, relative_weight)
+		match_file_path = match_n_cost(
+			image_mask_label_array,
+			image_transformed,
+			no_wavelets,
+			resized_size,
+			match_ite,
+			relative_weight
+		)
 		match_label = match_file_path[len(match_file_path):len(match_file_path)+1]
 
 		if match_label == label:
@@ -240,7 +255,7 @@ def eval(eval_data, mask_data, resized_size, image_mask_label_array, no_wavelets
 			log.write("Eval Image File:{}".format(image_file_path))
 			log.write("Wrong Match Image File:{}".format(match_file_path))
 		if image_count%int(args.print_freq) == 0:
-			print("Iteration No.:{}".format(image_count))\
+			print("Iteration No.:{}".format(image_count))
 			print("Current Evaluation Accuracy:{}".format((image_count_match*100.)/image_count))
 			log.write("Iteration No.:{}".format(image_count))
 			log.write("Current Evaluation Accuracy:{}".format((image_count_match*100.)/image_count))
