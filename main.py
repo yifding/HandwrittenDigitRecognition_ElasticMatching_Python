@@ -1,10 +1,65 @@
 import os
 import random
 import numpy as np
-import bob.ip.gabor.Transform as Transform
+from PIL import Image
 from time import gmtime, strftime
 from lib.cmdparser import parser
 import lib.utils as utils
+from tqdm import tqdm
+
+# import bob.ip.gabor.Transform as Transform
+# define alternative function to replace it
+from skimage.filters import gabor_kernel
+from scipy import ndimage as ndi
+
+class Transform:
+    def __init__(self, number_of_scales=5, number_of_directions=8,
+                 sigma=1.0, k_max=np.pi/2, k_fac=2.0):
+        self.scales = number_of_scales
+        self.directions = number_of_directions
+        self.sigma = sigma
+        self.k_max = k_max
+        self.k_fac = k_fac
+        
+        # Pre-compute all kernels in a vectorized way
+        scales = np.arange(self.scales)
+        directions = np.arange(self.directions)
+        
+        # Create frequency and theta arrays
+        freqs = self.k_max / (self.k_fac ** scales)
+        thetas = directions * np.pi / self.directions
+        
+        # Generate all combinations of frequencies and thetas
+        self.kernels = []
+        for freq in freqs:
+            for theta in thetas:
+                self.kernels.append(
+                    gabor_kernel(frequency=freq, theta=theta,
+                                 sigma_x=self.sigma, sigma_y=self.sigma)
+                )
+                
+        self.number_of_wavelets = len(self.kernels)
+
+    def transform(self, image):
+        """Transform an image using pre-computed Gabor kernels"""
+        image = image.astype(float)
+        H, W = image.shape
+        
+        # Pre-allocate output array for better performance
+        out = np.zeros((self.number_of_wavelets, H, W), dtype=np.complex128)
+        
+        # Apply all kernels (can be parallelized with multiprocessing if needed)
+        for i, kern in enumerate(self.kernels):
+            # Perform convolution in one step
+            real_kern = np.real(kern)
+            imag_kern = np.imag(kern)
+            
+            real_part = ndi.convolve(image, real_kern, mode='reflect')
+            imag_part = ndi.convolve(image, imag_kern, mode='reflect')
+            out[i] = real_part + 1j * imag_part
+            
+        return out
+
 
 def match_n_cost(image_mask_label_array, image_transformed, no_wavelets, resized_size, match_ite, relative_weight):
 	"""
@@ -18,117 +73,178 @@ def match_n_cost(image_mask_label_array, image_transformed, no_wavelets, resized
 							cost from deforming the edges)
 	"""
 
-	initial_positions = list()
-
-	for row in range(10):
-		for col in range(10):
-			initial_positions.append((row*2, col*2))
+	# Vectorized creation of initial positions
+	rows = np.repeat(np.arange(10) * 2, 10)
+	cols = np.tile(np.arange(10) * 2, 10)
+	initial_positions = list(zip(rows, cols))
+	initial_positions_array = np.array(initial_positions)
 
 	min_cost_global = image_mask_index_min_cost_global = 0.
 
 	# iterating through different masks stored from the mask set
-	for image_mask_count in range(image_mask_label_array.shape[0]):
+	for image_mask_count in range(len(image_mask_label_array)):
 		print('Matching with mask no.:{}'.format(image_mask_count))
-		image_mask = image_mask_label_array[image_mask_count, 0]
+		image_mask = image_mask_label_array[image_mask_count]['mask']
 		image_mask_absolute = np.absolute(image_mask)
 		min_cost_local_image_mask_count = float('inf')
 		# running match for 'match_ite' iterations
 		for ite in range(match_ite):
-			new_positions = list()
-			if ite>0:
-				for position in initial_positions:
-					direction = random.randint(1, 4)
-					if direction == 1:
-						if position[0]+1 > resized_size - 1:
-							position = resized_size - 1, position[1]
-						else:
-							temp_position = position[0] + 1, position[1] 
-					elif direction == 2:
-						if position[0] - 1 < 0:
-							temp_position = 0, position[1]
-						else:
-							temp_position = position[0] - 1, position[1]
-					elif direction == 3:
-						if position[1] + 1 > resized_size - 1:
-							temp_position = position[0], resized_size - 1 
-						else:
-							temp_position = position[0], position[1] + 1
-					elif direction == 4:
-						if position[1] -1 <0:
-							temp_position = position[0], 0
-						else:
-							temp_position = position[0], position[1] - 1
-					new_positions.append(position)
+			if ite > 0:
+				# Start with a copy of initial positions array
+				positions_array = initial_positions_array.copy()
+				
+				# Generate random directions for all positions at once (1-4)
+				directions = np.random.randint(1, 5, size=len(initial_positions))
+				
+				# Create masks for each direction
+				dir1_mask = (directions == 1)
+				dir2_mask = (directions == 2)
+				dir3_mask = (directions == 3)
+				dir4_mask = (directions == 4)
+				
+				# Update positions based on direction
+				# Direction 1: x+1
+				if np.any(dir1_mask):
+					positions_array[dir1_mask, 0] += 1
+					# Clip to boundaries
+					positions_array[dir1_mask, 0] = np.minimum(positions_array[dir1_mask, 0], resized_size - 1)
+				
+				# Direction 2: x-1
+				if np.any(dir2_mask):
+					positions_array[dir2_mask, 0] -= 1
+					# Clip to boundaries
+					positions_array[dir2_mask, 0] = np.maximum(positions_array[dir2_mask, 0], 0)
+				
+				# Direction 3: y+1
+				if np.any(dir3_mask):
+					positions_array[dir3_mask, 1] += 1
+					# Clip to boundaries
+					positions_array[dir3_mask, 1] = np.minimum(positions_array[dir3_mask, 1], resized_size - 1)
+				
+				# Direction 4: y-1
+				if np.any(dir4_mask):
+					positions_array[dir4_mask, 1] -= 1
+					# Clip to boundaries
+					positions_array[dir4_mask, 1] = np.maximum(positions_array[dir4_mask, 1], 0)
+				
+				# Convert back to list of tuples
+				new_positions = [tuple(pos) for pos in positions_array]
+				
+				# Also update the numpy array for further operations
+				new_positions_array = positions_array
 			else:
-				new_positions = initial_positions
+				new_positions = initial_positions.copy()
+				new_positions_array = initial_positions_array.copy()
 
-			image_mask_local_movement = np.empty((no_wavelets,resized_size//2,resized_size//2),'complex128')
+			# Create empty array for local movement
+			image_mask_local_movement = np.empty((no_wavelets, resized_size//2, resized_size//2), 'complex128')
+			
+			# Use the already created positions array
+			x_positions = new_positions_array[:, 0]
+			y_positions = new_positions_array[:, 1]
+			
+			# Create grid indices
+			grid_size = resized_size // 2
+			grid_rows = np.repeat(np.arange(grid_size), grid_size)
+			grid_cols = np.tile(np.arange(grid_size), grid_size)
+			
+			# Assign values in one vectorized operation
+			for w in range(no_wavelets):
+				image_mask_local_movement[w, grid_rows, grid_cols] = image_transformed[w, x_positions, y_positions]
 
-			row = 0
-			col = 0
-			for position in new_positions:
-				image_mask_local_movement[:,row,col] = image_transformed[:,position[0],position[1]]
-				col += 1
-				if col == resized_size//2:
-					row += 1
-					col = 0
-
-			sum_all_edges = 0.
-
-			# calculating cost due to edge deformation by calculating the sum of all edge lengths
-			for position_count in range(len(new_positions)):
-				sum_surrounding_edge_node = 0
-				if position_count - 10 < 0:
-					sum_surrounding_edge_node = 0
-				else:
-					sum_surrounding_edge_node = ((((new_positions[position_count][0]-\
-												new_positions[position_count-resized_size//2][0])**2)\
-												+((new_positions[position_count][1]-\
-													new_positions[position_count-10][1])**2)**0.5)-(1))**2      
+			# Use the already created positions array
+			positions_array = new_positions_array  # Use the numpy array we already created
+			positions_count = len(positions_array)
+			grid_size = resized_size // 2
+			sum_all_edges = 0.0
+			
+			# Pre-compute all indices for edge connections
+			# Vertical connections (top neighbor)
+			top_indices = np.arange(positions_count) - grid_size
+			valid_top = (top_indices >= 0)
+			
+			# Vertical connections (bottom neighbor)
+			bottom_indices = np.arange(positions_count) + grid_size
+			valid_bottom = (bottom_indices < positions_count)
+			
+			# Horizontal connections (left neighbor)
+			left_indices = np.arange(positions_count) - 1
+			# Create a mask for valid left indices first
+			valid_left_mask = (left_indices >= 0)
+			valid_left = np.zeros(positions_count, dtype=bool)
+			
+			# Only check positions where left_indices are valid
+			if np.any(valid_left_mask):
+				valid_left_indices = left_indices[valid_left_mask]
+				# Compare x-coordinates of current positions with their left neighbors
+				valid_left[valid_left_mask] = positions_array[valid_left_indices, 0] < positions_array[valid_left_mask, 0]
+			
+			# Horizontal connections (right neighbor)
+			right_indices = np.arange(positions_count) + 1
+			# Create a mask for valid right indices first
+			valid_right_mask = (right_indices < positions_count)
+			valid_right = np.zeros(positions_count, dtype=bool)
+			
+			# Only check positions where right_indices are valid
+			if np.any(valid_right_mask):
+				valid_right_indices = right_indices[valid_right_mask]
+				# Compare x-coordinates of current positions with their right neighbors
+				valid_right[valid_right_mask] = positions_array[valid_right_indices, 0] > positions_array[valid_right_mask, 0]
+			
+			# Calculate edge costs safely
+			# For top edges
+			if np.any(valid_top):
+				valid_top_indices = top_indices[valid_top]
+				top_edges = positions_array[valid_top] - positions_array[valid_top_indices]
+				top_edge_lengths = np.sqrt(np.sum(top_edges**2, axis=1))
+				sum_all_edges += np.sum((top_edge_lengths - 1)**2)
 				
-				if (position_count+resized_size//2)>(resized_size//2)**2 - 1:
-					sum_surrounding_edge_node = sum_surrounding_edge_node
-				else:
-					sum_surrounding_edge_node = sum_surrounding_edge_node+((((new_positions[position_count][0]-\
-												positions_new[position_count+resized_size//2][0])**2)+\
-												((positions_new[position_count][1]-\
-												positions_new[position_count+resized_size//2][1])**2)**0.5)-(1))**2      
+			# For bottom edges
+			if np.any(valid_bottom):
+				valid_bottom_indices = bottom_indices[valid_bottom]
+				bottom_edges = positions_array[valid_bottom] - positions_array[valid_bottom_indices]
+				bottom_edge_lengths = np.sqrt(np.sum(bottom_edges**2, axis=1))
+				sum_all_edges += np.sum((bottom_edge_lengths - 1)**2)
 				
-				if (position_count-1)<0 or positions[position_count][0]<positions[position_count-1][0]:
-					sum_surrounding_edge_node = sum_surrounding_edge_node
-				else:
-					sum_surrounding_edge_node = sum_surrounding_edge_node+((((positions_new[position_new][0]-\
-												positions[position_count-1][0])**2)+\
-												((positions_new[position_count][1]-\
-												positions_new[position_count-1][1])**2)**0.5)-(1))**2      
+			# For left edges
+			if np.any(valid_left):
+				valid_left_indices = left_indices[valid_left]
+				left_edges = positions_array[valid_left] - positions_array[valid_left_indices]
+				left_edge_lengths = np.sqrt(np.sum(left_edges**2, axis=1))
+				sum_all_edges += np.sum((left_edge_lengths - 1)**2)
 				
-				if ((position_count+1)>(resized_size//2)**2 - 1) or (positions[position_count+1][0]<positions[position_count][0]):
-					sum_surrounding_edge_node = sum_surrounding_edge_node
-				else:
-					sum_surrounding_edge_node = sum_surrounding_edge_node+((((positions_new[position_count][0]\
-												-positions_new[position_count+1][0])**2)+\
-												((positions_new[position_count][1]-\
-												positions_new[position_count+1][1])**2)**0.5)-(1))**2      
-				sum_all_edges += sum_surrounding_edge_node
+			# For right edges
+			if np.any(valid_right):
+				valid_right_indices = right_indices[valid_right]
+				right_edges = positions_array[valid_right] - positions_array[valid_right_indices]
+				right_edge_lengths = np.sqrt(np.sum(right_edges**2, axis=1))
+				sum_all_edges += np.sum((right_edge_lengths - 1)**2)
 
 			image_mask_local_movement_real = np.real(image_mask_local_movement)
 			image_mask_local_movement_imgn = np.imag(image_mask_local_movement)
 			image_mask_local_movement_abs = np.absolute(image_mask_local_movement)
 
-			sum_all_vertices = 0.
-
-			# normalization facots for cost from vertex computed
-			for row in range(resized_size//2):
-				for col in range(resized_size//2):
-					sum_per_vertex = square_image_mask_absolute = square_image_mask_local_movement = 0
-					for wavelet_no in range(no_wavelets):
-						sum_per_vertex += image_mask_absolute[row,col,wavelet_no]\
-										*image_mask_local_movement_abs[row,col,wavelet_no]
-						square_image_mask_absolute += (image_mask_absolute[row,col,wavelet_no])**2
-						square_image_mask_local_movement += (image_mask_local_movement_abs[row,col,wavelet_no])**2
-
-					sum_per_vertex /= (square_image_mask_absolute*square_image_mask_local_movement)**0.5
-					sum_all_vertices += sum_per_vertex
+			# Vectorized computation of dot product between mask and local movement
+			# Reshape to 2D arrays for easier dot product calculation
+			mask_flat = image_mask_absolute.reshape(resized_size//2, resized_size//2, no_wavelets)
+			local_flat = image_mask_local_movement_abs.reshape(resized_size//2, resized_size//2, no_wavelets)
+			
+			# Compute dot products for all vertices at once
+			dot_products = np.sum(mask_flat * local_flat, axis=2)
+			
+			# Compute norms for normalization
+			mask_norms = np.sqrt(np.sum(mask_flat**2, axis=2))
+			local_norms = np.sqrt(np.sum(local_flat**2, axis=2))
+			
+			# Avoid division by zero
+			mask_norms = np.maximum(mask_norms, 1e-10)
+			local_norms = np.maximum(local_norms, 1e-10)
+			
+			# Compute normalized dot products (cosine similarity)
+			normalized_dot_products = dot_products / (mask_norms * local_norms)
+			
+			# Sum all vertex costs
+			sum_all_vertices = np.sum(normalized_dot_products)
 		
 			# total cost computed
 			cost = relative_weight*sum_all_edges - sum_all_vertices
@@ -142,7 +258,7 @@ def match_n_cost(image_mask_label_array, image_transformed, no_wavelets, resized
 			min_cost_global = min_cost_local_image_mask_count
 			image_mask_index_min_cost_global = image_mask_count
 
-	return image_mask_label_array[image_mask_index_min_cost_global,2]
+	return image_mask_label_array[image_mask_index_min_cost_global]['file_path']
 
 def mask(mask_data, no_wavelets, resized_size, hyperparameter_list):
 	"""
@@ -159,7 +275,7 @@ def mask(mask_data, no_wavelets, resized_size, hyperparameter_list):
 		file_list.extend(filenames)
 
 	image_count = 0
-	for image_file in file_list:
+	for image_file in tqdm(file_list):
 		image_file_path = os.path.join(mask_data, image_file)
 		image = Image.open(image_file_path)
 		label = image_file_path[len(image_file_path):len(image_file_path)+1]
@@ -171,23 +287,26 @@ def mask(mask_data, no_wavelets, resized_size, hyperparameter_list):
 								k_max=hyperparameter_list[3],
 								k_fac=hyperparameter_list[4])
 		image_transformed = gabor_wavelets.transform(image)
-		image_mask = np.empty((no_wavelets, resized_size//2, resized_size//2),'complex128')
+		
+		# Vectorized selection of pixels at stride 2
+		# This creates a view of the original array, with every 2nd element
+		image_mask = image_transformed[:, 0:resized_size:2, 0:resized_size:2].copy()
 
-		for wavelet_no in range(no_wavelets):
-			for row in range(0,resized_size,2):
-				for col in range(0,resized_size,2):
-					image_mask[wavelet_no, row/2, col/2] = image_transformed[wavelet_no, row, col]
-
+		# Create a structured data object to hold heterogeneous data
+		current_item = {
+			'mask': image_mask,
+			'label': label,
+			'file_path': os.path.join(mask_data, image_file)
+		}
+		
 		if image_count == 0:
-			image_mask_label_array=np.array([image_mask, label, os.path.join(match_data, image_file)])
+			image_mask_label_array = [current_item]
 		else:
-			image_mask_label_array=np.vstack([image_mask_label_array,
-											np.array([image_mask_label_array, label,
-											os.path.join(match_data, image_file)])])
+			image_mask_label_array.append(current_item)
 
 		image_count += 1
 
-		return image_mask_label_array
+	return image_mask_label_array
 
 def eval(
 	eval_data,
@@ -198,7 +317,8 @@ def eval(
 	log,
 	hyperparameter_list,
 	match_ite,
-	relative_weight
+	relative_weight,
+	args
 	):
 	"""
 	This method stores the masks from the mask ('train') set
@@ -260,7 +380,123 @@ def eval(
 			log.write("Iteration No.:{}".format(image_count))
 			log.write("Current Evaluation Accuracy:{}".format((image_count_match*100.)/image_count))
 
-		return (image_count_match*100.)/image_count
+	return (image_count_match*100.)/image_count
+
+def test_with_limited_images(
+	eval_data,
+	mask_data,
+	resized_size,
+	no_wavelets,
+	hyperparameter_list,
+	match_ite,
+	relative_weight,
+	args,
+	limit_mask=1000,
+	limit_eval=100
+):
+	"""
+	A test function that processes only a limited number of images
+	:param eval_data: evaluation dataset path
+	:param mask_data: mask/'train' dataset path
+	:param resized_size: image size the data has been resized to
+	:param no_wavelets: number of wavelets in the Gabor stack
+	:param hyperparameter_list: list of Gabor hyperparameters
+	:param match_ite: number of iterations for matching
+	:param relative_weight: weight for edge deformation cost vs vertex matching cost
+	:param args: command line arguments
+	:param limit_mask: maximum number of mask images to process (default: 1000)
+	:param limit_eval: maximum number of evaluation images to process (default: 100)
+	:return: evaluation accuracy
+	"""
+	print(f"Running quick test with {limit_mask} mask images and {limit_eval} evaluation images...")
+	
+	# Create a temporary log file
+	test_log_path = os.path.join('./runs', 'test_' + strftime("%Y-%m-%d_%H-%M-%S", gmtime()))
+	if not os.path.exists(test_log_path):
+		os.makedirs(test_log_path)
+	test_log_file = os.path.join(test_log_path, "test_log")
+	test_log = open(test_log_file, "a")
+	
+	# Get limited mask images
+	file_list_mask = []
+	for (dirpath, dirnames, filenames) in os.walk(mask_data):
+		file_list_mask.extend(filenames[:limit_mask])
+		break  # Only process top-level directory
+	
+	# Process limited mask images
+	image_count = 0
+	image_mask_label_array = []
+	
+	for image_file in tqdm(file_list_mask):
+		image_file_path = os.path.join(mask_data, image_file)
+		image = Image.open(image_file_path)
+		label = image_file_path[len(image_file_path):len(image_file_path)+1]
+		image = np.array(image)
+
+		gabor_wavelets = Transform(number_of_scales=hyperparameter_list[0],
+								number_of_directions=hyperparameter_list[1],
+								sigma=hyperparameter_list[3],
+								k_max=hyperparameter_list[3],
+								k_fac=hyperparameter_list[4])
+		image_transformed = gabor_wavelets.transform(image)
+		image_mask = image_transformed[:, 0:resized_size:2, 0:resized_size:2].copy()
+
+		# Create a structured data object
+		current_item = {
+			'mask': image_mask,
+			'label': label,
+			'file_path': os.path.join(mask_data, image_file)
+		}
+		
+		image_mask_label_array.append(current_item)
+		image_count += 1
+	
+	# Get limited evaluation images
+	file_list_eval = []
+	for (dirpath, dirnames, filenames) in os.walk(eval_data):
+		file_list_eval.extend(filenames[:limit_eval])
+		break  # Only process top-level directory
+	
+	# Process limited evaluation images
+	image_count = 0
+	image_count_match = 0
+
+	for image_file in tqdm(file_list_eval):
+		image_file_path = os.path.join(eval_data, image_file)
+		image = Image.open(image_file_path)
+		label = image_file_path[len(image_file_path):len(image_file_path)+1]
+		image = np.array(image)
+
+		gabor_wavelets = Transform(number_of_scales=hyperparameter_list[0],
+								number_of_directions=hyperparameter_list[1],
+								sigma=hyperparameter_list[3],
+								k_max=hyperparameter_list[3],
+								k_fac=hyperparameter_list[4])
+		image_transformed = gabor_wavelets.transform(image)
+
+		match_file_path = match_n_cost(
+			image_mask_label_array,
+			image_transformed,
+			no_wavelets,
+			resized_size,
+			match_ite,
+			relative_weight
+		)
+		match_label = match_file_path[len(match_file_path):len(match_file_path)+1]
+
+		if match_label == label:
+			image_count_match += 1
+		
+		image_count += 1
+		print(f"Test Progress: {image_count}/{len(file_list_eval)}, Current Accuracy: {(image_count_match*100.)/image_count:.2f}%")
+		test_log.write(f"Test Progress: {image_count}/{len(file_list_eval)}, Current Accuracy: {(image_count_match*100.)/image_count:.2f}%\n")
+	
+	test_accuracy = (image_count_match*100.)/image_count
+	print(f"Test completed! Final test accuracy: {test_accuracy:.2f}%")
+	test_log.write(f"Test completed! Final test accuracy: {test_accuracy:.2f}%\n")
+	
+	test_log.close()
+	return test_accuracy
 
 def main():
 	save_path = './runs/' + strftime("%Y-%m-%d_%H-%M-%S", gmtime())
@@ -274,27 +510,48 @@ def main():
 	for arg in vars(args):
 		print(arg, getattr(args, arg))
 		log.write(arg + ':' + str(getattr(args, arg)) + '\n')
+		
+	# Check if quick test mode is enabled
+	quick_test = getattr(args, 'quick_test', False)
 
-	utils.extract(args.dataset, args.raw_data)
-	utils.resize(args.mask_data, args.resized_size)
-	utils.resize(args.eval_data, args.resized_size)
-	utils.deskew(args.image_mask_countdata)
-	utils.deskew(args.eval_data)
+	# utils.extract(args.dataset, args.raw_data)
+	# utils.resize(args.mask_data, args.resized_size)
+	# utils.resize(args.eval_data, args.resized_size)
+	# utils.deskew(args.mask_data)
+	# utils.deskew(args.eval_data)
 
 	hyperparameter_list = [args.no_scales, args.no_directions, args.sigma,\
 						 args.frequency_max, args.frequency_factor]
-	image_mask_label_array = mask(args.mask_data, args.no_scales*args.no_directions, \
-								args.resized_size, hyperparameter_list)
-	eval_accuracy = eval(args.eval_data, args.mask_data, args.resized_size, args.image_mask_label_array, \
-						args.no_scales*args.no_directions, log, hyperparameter_list, args.match_ite, \
-						args.relative_weight)
+						 
+	if hasattr(args, 'quick_test') and args.quick_test:
+		# Run the quick test with limited number of images
+		print("Running quick test mode with limited images...")
+		eval_accuracy = test_with_limited_images(
+			args.eval_data, 
+			args.mask_data, 
+			args.resized_size, 
+			args.no_scales*args.no_directions,
+			hyperparameter_list, 
+			args.match_ite, 
+			args.relative_weight, 
+			args,
+			args.mask_limit,
+			args.eval_limit
+		)
+	else:
+		# Run the full evaluation
+		print("Running full evaluation with all images...")
+		image_mask_label_array = mask(args.mask_data, args.no_scales*args.no_directions, \
+									args.resized_size, hyperparameter_list)
+		eval_accuracy = eval(args.eval_data, args.mask_data, args.resized_size, image_mask_label_array, \
+							args.no_scales*args.no_directions, log, hyperparameter_list, args.match_ite, \
+							args.relative_weight, args)
 
-	print("Final Evaluation Accuracy:{eval_accuracy:.3f}".format(eval_accuracy))
-	log.write("Final Evaluation Accuracy:{eval_accuracy:.3f}".format(eval_accuracy))
+	print("Final Evaluation Accuracy:{:.3f}".format(eval_accuracy))
+	log.write("Final Evaluation Accuracy:{:.3f}".format(eval_accuracy))
 
 	log.close()
 
+
 if __name__ == '__main__':
 	main()
-
-
